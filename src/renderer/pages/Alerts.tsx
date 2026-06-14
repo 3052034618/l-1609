@@ -62,18 +62,13 @@ export default function Alerts() {
 
   async function handleMarkHandled(id: string) {
     try {
-      const index = alerts.findIndex(a => a.id === id);
-      if (index === -1) return;
-      const newAlerts = [...alerts];
-      newAlerts[index] = {
-        ...newAlerts[index],
-        handled: true,
-        handledBy: 'admin',
-        handledAt: new Date().toISOString(),
-        read: true
-      };
-      setAlerts(newAlerts);
-      message.success('已标记为已处理');
+      await api.markAlertHandled(id);
+      const s = students.find(st => {
+        const a = alerts.find(x => x.id === id);
+        return a && st.id === a.studentId;
+      });
+      message.success(s ? `已跟进学员【${s.name}】的无学时预警，状态已永久保存` : '已标记为已处理，状态已永久保存');
+      loadData();
     } catch (e: any) {
       message.error(e.message || '操作失败');
     }

@@ -51,38 +51,87 @@ export function validateAge(age: number): { valid: boolean; message: string } {
   return { valid: true, message: '' };
 }
 
-export async function validatePhoto(file: File): Promise<{ valid: boolean; message: string }> {
+export async function validatePhoto(
+  file: File | null,
+  options: { required?: boolean } = {}
+): Promise<{ valid: boolean; message: string }> {
+  const { required = true } = options;
   return new Promise((resolve) => {
     if (!file) {
-      resolve({ valid: true, message: '' });
+      if (required) {
+        resolve({ valid: false, message: '请上传学员照片，照片为必填项' });
+      } else {
+        resolve({ valid: true, message: '' });
+      }
+      return;
+    }
+
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/bmp', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      const ext = file.type ? file.type.split('/')[1]?.toUpperCase() || '未知' : '未知';
+      resolve({
+        valid: false,
+        message: `照片格式不支持：${ext}格式，请上传JPG、PNG、GIF、BMP或WEBP格式的图片`
+      });
       return;
     }
 
     const maxSize = 5 * 1024 * 1024;
-    if (file.size > maxSize) {
-      resolve({ valid: false, message: '照片大小不能超过5MB' });
+    if (file.size === 0) {
+      resolve({ valid: false, message: '照片文件为空，请重新选择有效的图片文件' });
       return;
     }
-
-    if (!/^image\//.test(file.type)) {
-      resolve({ valid: false, message: '请上传图片文件' });
+    if (file.size > maxSize) {
+      const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+      resolve({ valid: false, message: `照片大小为${sizeMB}MB，不能超过5MB` });
       return;
     }
 
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(img.src);
+      if (img.width <= 0 || img.height <= 0) {
+        resolve({ valid: false, message: '无法获取照片尺寸，请重新选择有效图片' });
+        return;
+      }
       if (img.width < 300 || img.height < 400) {
-        resolve({ valid: false, message: `照片分辨率过低(${img.width}x${img.height})，建议至少300x400像素` });
+        resolve({
+          valid: false,
+          message: `照片分辨率过低(${img.width}×${img.height}像素)，必须至少300×400像素才能保证清晰`
+        });
+        return;
+      }
+      if (img.width / img.height > 1.2 || img.height / img.width > 1.8) {
+        resolve({
+          valid: false,
+          message: `照片比例异常(${img.width}:${img.height})，建议使用竖版证件照比例(3:4左右)`
+        });
         return;
       }
       resolve({ valid: true, message: '' });
     };
     img.onerror = () => {
-      resolve({ valid: false, message: '无法读取图片，请重新选择' });
+      resolve({ valid: false, message: '照片文件损坏或无法读取，请更换其他图片' });
     };
     img.src = URL.createObjectURL(file);
   });
+}
+
+export function validateExistingPhoto(
+  photoData: string | undefined | null,
+  options: { required?: boolean } = {}
+): { valid: boolean; message: string } {
+  const { required = true } = options;
+  if (!photoData || photoData.trim() === '') {
+    if (required) {
+      return { valid: false, message: '学员照片缺失，请上传照片' };
+    }
+    return { valid: true, message: '' };
+  }
+  if (!photoData.startsWith('data:image/')) {
+    return { valid: false, message: '照片数据格式不正确，请重新上传' };
+  }
+  return { valid: true, message: '' };
 }
 
 export const SUBJECT_NAMES: Record<string, string> = {

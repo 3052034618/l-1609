@@ -169,6 +169,9 @@ declare global {
 
       getAlerts: () => Promise<Alert[]>;
       checkInactiveStudents: () => Promise<Alert[]>;
+      updateAlert: (id: string, data: Partial<Alert>) => Promise<Alert>;
+      markAlertRead: (id: string) => Promise<Alert>;
+      markAlertHandled: (id: string) => Promise<Alert>;
 
       getStatistics: (params: { startDate?: string; endDate?: string }) => Promise<any>;
       exportReport: (params: { startDate: string; endDate: string; filePath: string }) => Promise<boolean>;
@@ -212,6 +215,9 @@ const fallbackApi = {
   generateExamSuggestions: () => Promise.resolve([] as Exam[]),
   getAlerts: () => Promise.resolve([] as Alert[]),
   checkInactiveStudents: () => Promise.resolve([] as Alert[]),
+  updateAlert: (_id: string, data: any) => Promise.resolve(data as Alert),
+  markAlertRead: (_id: string) => Promise.resolve({ id: _id, read: true } as Alert),
+  markAlertHandled: (_id: string) => Promise.resolve({ id: _id, handled: true } as Alert),
   getStatistics: () => Promise.resolve({ coachStats: [], vehicleStats: [], timeStats: [], summary: {} }),
   exportReport: () => Promise.resolve(true),
   getSwapRequests: () => Promise.resolve([] as SwapRequest[]),

@@ -13,7 +13,8 @@ import {
   Space,
   Row,
   Col,
-  Descriptions
+  Descriptions,
+  Alert as AntAlert
 } from 'antd';
 import {
   PlusOutlined,
@@ -358,32 +359,82 @@ export default function Appointments() {
         open={completeOpen}
         onCancel={() => setCompleteOpen(false)}
         footer={null}
-        width={450}
+        width={520}
       >
-        {completingAppointment && (
-          <Form form={completeForm} layout="vertical" onFinish={handleCompleteSubmit}>
-            <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="学员">
-                {students.find(s => s.id === completingAppointment.studentId)?.name}
-              </Descriptions.Item>
-              <Descriptions.Item label="科目">{SUBJECT_NAMES[completingAppointment.subject]}</Descriptions.Item>
-              <Descriptions.Item label="预约时段">
-                {completingAppointment.date} {completingAppointment.startTime}-{completingAppointment.endTime}
-              </Descriptions.Item>
-            </Descriptions>
-            <Form.Item
-              label="实际教学学时(小时)"
-              name="actualHours"
-              rules={[{ required: true, message: '请输入实际学时' }]}
-            >
-              <InputNumber min={0.5} max={8} step={0.5} style={{ width: '100%' }} />
-            </Form.Item>
-            <div className="form-actions">
-              <Button onClick={() => setCompleteOpen(false)}>取消</Button>
-              <Button type="primary" htmlType="submit">确认记录</Button>
-            </div>
-          </Form>
-        )}
+        {completingAppointment && (() => {
+          const student = students.find(s => s.id === completingAppointment.studentId);
+          const [sh, sm] = completingAppointment.startTime.split(':').map(Number);
+          const [eh, em] = completingAppointment.endTime.split(':').map(Number);
+          const slotHours = (eh - sh) + (em - sm) / 60;
+          const remainingHours = student?.remainingHours ?? 0;
+          const maxAllowed = Math.max(0.5, Math.min(remainingHours, slotHours));
+          const defaultHrs = Math.min(maxAllowed,
+            completeForm.getFieldValue('actualHours') ?? slotHours);
+          return (
+            <Form form={completeForm} layout="vertical" onFinish={handleCompleteSubmit}>
+              <Descriptions column={1} size="small" bordered style={{ marginBottom: 16 }}>
+                <Descriptions.Item label="学员">
+                  {student?.name || '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="科目">{SUBJECT_NAMES[completingAppointment.subject]}</Descriptions.Item>
+                <Descriptions.Item label="预约时段">
+                  {completingAppointment.date} {completingAppointment.startTime}-{completingAppointment.endTime}
+                  <Tag color="blue" style={{ marginLeft: 8 }}>时段时长 {slotHours.toFixed(1)}h</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="学员剩余学时">
+                  <Tag color={remainingHours > 5 ? 'green' : remainingHours > 0 ? 'orange' : 'red'}>
+                    {remainingHours.toFixed(1)} 小时
+                  </Tag>
+                </Descriptions.Item>
+              </Descriptions>
+
+              <AntAlert
+                style={{ marginBottom: 16 }}
+                type={remainingHours <= 0 ? 'error' : 'info'}
+                showIcon
+                message={
+                  remainingHours <= 0
+                    ? '⚠️ 该学员剩余学时已为0，无法继续记录，请先联系学员续费或升级套餐'
+                    : `最多可录入 ${maxAllowed.toFixed(1)} 小时（取"剩余学时"与"预约时段时长"的较小值）`
+                }
+              />
+
+              <Form.Item
+                label="实际教学学时(小时)"
+                name="actualHours"
+                rules={[
+                  { required: true, message: '请输入实际学时' },
+                  {
+                    validator: (_r, value: number) => {
+                      if (value > maxAllowed + 0.001) {
+                        return Promise.reject(
+                          new Error(`录入学时不能超过上限 ${maxAllowed.toFixed(1)} 小时（剩余学时+时段时长双重限制）`)
+                        );
+                      }
+                      if (value <= 0) return Promise.reject(new Error('实际学时必须大于0'));
+                      return Promise.resolve();
+                    }
+                  }
+                ]}
+              >
+                <InputNumber
+                  min={0.5}
+                  max={maxAllowed}
+                  step={0.5}
+                  style={{ width: '100%' }}
+                  addonBefore={`上限 ${maxAllowed.toFixed(1)}h`}
+                  defaultValue={defaultHrs}
+                />
+              </Form.Item>
+              <div className="form-actions">
+                <Button onClick={() => setCompleteOpen(false)}>取消</Button>
+                <Button type="primary" htmlType="submit" disabled={remainingHours <= 0}>
+                  确认记录 {defaultHrs.toFixed(1)} 学时
+                </Button>
+              </div>
+            </Form>
+          );
+        })()}
       </Modal>
 
       <Modal

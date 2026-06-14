@@ -70,6 +70,9 @@ export function registerDatabaseHandlers() {
       throw new Error('该身份证号已存在');
     }
 
+    const photoError = validateStudentPhoto(data.photo, { required: true });
+    if (photoError) throw new Error(`照片校验失败：${photoError}`);
+
     const student: Student = {
       ...data,
       id: generateId('student'),
@@ -109,6 +112,15 @@ export function registerDatabaseHandlers() {
       }
       data.birthDate = birthDate;
       data.age = age;
+    }
+
+    if ('photo' in data) {
+      const photoToCheck = data.photo;
+      if (!photoToCheck && db.students[index].photo) {
+      } else {
+        const photoError = validateStudentPhoto(photoToCheck || db.students[index].photo, { required: true });
+        if (photoError) throw new Error(`照片校验失败：${photoError}`);
+      }
     }
 
     db.students[index] = { ...db.students[index], ...data };
@@ -198,21 +210,35 @@ export function registerDatabaseHandlers() {
   // Schedules - Smart scheduling
   ipcMain.handle('db:getSchedules', () => db.schedules);
 
+  const COACH_LEVEL_WEIGHT: Record<string, number> = {
+    'gold': 4,
+    'senior': 3,
+    'intermediate': 2,
+    'junior': 1
+  };
+
   ipcMain.handle('db:generateSchedules', (_e, dateStr: string) => {
     const date = new Date(dateStr);
-    const dayOfWeek = date.getDay();
+    // JS getDay(): 0=周日 1=周一 ... 6=周六
+    // weeklySchedule[]: [0]=周一 [1]=周二 ... [5]=周六 [6]=周日
+    // → 需要转换索引
+    const jsDayOfWeek = date.getDay();
+    const coachScheduleIndex = (jsDayOfWeek + 6) % 7;
     const todaySchedules: Schedule[] = [];
 
+    // 1. 找当天在岗、且工作日值班的教练
     const availableCoaches = db.coaches.filter(c =>
-      c.status === 'active' && c.weeklySchedule[dayOfWeek] === 1
+      c.status === 'active' && c.weeklySchedule[coachScheduleIndex] === 1
     );
 
-    const availableVehicles = db.vehicles.filter(v => v.status === 'available');
+    // 2. 找当前可用的车辆（status=available 且 当天无预约/排班冲突）
+    const allAvailableVehicles = db.vehicles.filter(v => v.status === 'available');
 
     const activeStudents = db.students.filter(
       s => s.status === 'active' && s.remainingHours > 0
     );
 
+    // 统计当天每个教练已排的学时
     const coachHourCounts: Record<string, number> = {};
     availableCoaches.forEach(c => {
       coachHourCounts[c.id] = db.schedules
@@ -224,55 +250,86 @@ export function registerDatabaseHandlers() {
         }, 0);
     });
 
+    // 3. 资质加权排序：资质高的优先；资质相同时，当天已排学时少的优先（公平轮换）
     const sortedCoaches = [...availableCoaches].sort((a, b) => {
-      const diff = coachHourCounts[a.id] - coachHourCounts[b.id];
-      if (diff !== 0) return diff;
-      return b.level.localeCompare(a.level);
+      const weightA = COACH_LEVEL_WEIGHT[a.level] ?? 0;
+      const weightB = COACH_LEVEL_WEIGHT[b.level] ?? 0;
+      if (weightB !== weightA) return weightB - weightA;
+      return (coachHourCounts[a.id] || 0) - (coachHourCounts[b.id] || 0);
     });
 
-    let coachIndex = 0;
-    let vehicleIndex = 0;
     const timeSlots = [
-      { start: '08:00', end: '12:00' },
-      { start: '13:00', end: '17:00' }
+      { start: '08:00', end: '12:00', hours: 4 },
+      { start: '13:00', end: '17:00', hours: 4 }
     ];
 
+    function hasCoachSlotConflict(coachId: string, start: string, end: string): boolean {
+      return db.schedules
+        .filter(s => s.coachId === coachId && s.date === dateStr && s.status !== 'rejected')
+        .some(s => !(parseTime(end) <= parseTime(s.startTime) || parseTime(start) >= parseTime(s.endTime)))
+        || todaySchedules
+          .filter(s => s.coachId === coachId)
+          .some(s => !(parseTime(end) <= parseTime(s.startTime) || parseTime(start) >= parseTime(s.endTime)));
+    }
+
+    function hasVehicleSlotConflict(vehicleId: string, start: string, end: string): boolean {
+      const scheduleConflict = db.schedules
+        .filter(s => s.vehicleId === vehicleId && s.date === dateStr && s.status !== 'rejected')
+        .some(s => !(parseTime(end) <= parseTime(s.startTime) || parseTime(start) >= parseTime(s.endTime)));
+      const appointmentConflict = db.appointments
+        .filter(a => a.vehicleId === vehicleId && a.date === dateStr && a.status !== 'cancelled')
+        .some(a => !(parseTime(end) <= parseTime(a.startTime) || parseTime(start) >= parseTime(a.endTime)));
+      const todayConflict = todaySchedules
+        .filter(s => s.vehicleId === vehicleId)
+        .some(s => !(parseTime(end) <= parseTime(s.startTime) || parseTime(start) >= parseTime(s.endTime)));
+      return scheduleConflict || appointmentConflict || todayConflict;
+    }
+
+    // 按时间段逐个排
     for (const slot of timeSlots) {
-      if (coachIndex >= sortedCoaches.length || vehicleIndex >= availableVehicles.length) break;
+      // 优先选资质最高、且有剩余工时、且时段无冲突的教练
+      const coach = sortedCoaches.find(c => {
+        const currentHours = coachHourCounts[c.id] || 0;
+        if (currentHours + slot.hours > c.maxDailyHours) return false;
+        if (hasCoachSlotConflict(c.id, slot.start, slot.end)) return false;
+        return true;
+      });
+      if (!coach) continue;
 
-      const coach = sortedCoaches[coachIndex];
-      const vehicle = availableVehicles[vehicleIndex];
-      const currentHours = coachHourCounts[coach.id];
-      const slotHours = 4;
+      // 找此时段可用、无冲突的车辆
+      const vehicle = allAvailableVehicles.find(v => {
+        if (v.status !== 'available') return false;
+        return !hasVehicleSlotConflict(v.id, slot.start, slot.end);
+      });
+      if (!vehicle) continue;
 
-      if (currentHours + slotHours <= coach.maxDailyHours) {
-        const slotStudents = activeStudents
-          .filter(s => !todaySchedules.some(sc => sc.studentIds.includes(s.id)))
-          .slice(0, 2)
-          .map(s => s.id);
+      // 从 activeStudents 里找当天还没排班、且有剩余学时的学员
+      const slotStudents = activeStudents
+        .filter(s => !todaySchedules.some(sc => sc.studentIds.includes(s.id)))
+        .slice(0, 2)
+        .map(s => s.id);
 
-        if (slotStudents.length > 0) {
-          const schedule: Schedule = {
-            id: generateId('schedule'),
-            date: dateStr,
-            coachId: coach.id,
-            vehicleId: vehicle.id,
-            startTime: slot.start,
-            endTime: slot.end,
-            studentIds: slotStudents,
-            status: 'pending',
-            approvedBy: null,
-            approvedAt: null,
-            createdAt: new Date().toISOString(),
-            notes: `系统自动生成 - 教练资质:${coach.level}`
-          };
-          todaySchedules.push(schedule);
-          coachHourCounts[coach.id] += slotHours;
-        }
+      if (slotStudents.length > 0) {
+        const levelNames: Record<string, string> = {
+          gold: '金牌', senior: '高级', intermediate: '中级', junior: '初级'
+        };
+        const schedule: Schedule = {
+          id: generateId('schedule'),
+          date: dateStr,
+          coachId: coach.id,
+          vehicleId: vehicle.id,
+          startTime: slot.start,
+          endTime: slot.end,
+          studentIds: slotStudents,
+          status: 'pending',
+          approvedBy: null,
+          approvedAt: null,
+          createdAt: new Date().toISOString(),
+          notes: `AI自动排班 - 教练资质:${levelNames[coach.level] || coach.level} | 当日累计:${(coachHourCounts[coach.id] || 0) + slot.hours}h/${coach.maxDailyHours}h`
+        };
+        todaySchedules.push(schedule);
+        coachHourCounts[coach.id] = (coachHourCounts[coach.id] || 0) + slot.hours;
       }
-
-      coachIndex = (coachIndex + 1) % Math.max(sortedCoaches.length, 1);
-      vehicleIndex = (vehicleIndex + 1) % Math.max(availableVehicles.length, 1);
     }
 
     db.schedules.push(...todaySchedules);
@@ -318,6 +375,29 @@ export function registerDatabaseHandlers() {
   ipcMain.handle('db:getAppointments', () => db.appointments);
 
   ipcMain.handle('db:createAppointment', (_e, data: Omit<Appointment, 'id'>) => {
+    const coach = db.coaches.find(c => c.id === data.coachId);
+    if (!coach) throw new Error('所选教练不存在');
+    if (coach.status !== 'active') throw new Error(`预约失败：教练【${coach.name}】当前不在岗（状态:${coach.status}），无法安排教学`);
+
+    // 校验该日期是否在教练的工作日排班中
+    const apptDate = new Date(data.date);
+    const jsDay = apptDate.getDay();
+    const scheduleIdx = (jsDay + 6) % 7;
+    if (!coach.weeklySchedule[scheduleIdx]) {
+      const weekDays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+      throw new Error(`预约失败：教练【${coach.name}】${weekDays[scheduleIdx]}不上班，无法预约该日期`);
+    }
+
+    const vehicle = db.vehicles.find(v => v.id === data.vehicleId);
+    if (!vehicle) throw new Error('所选车辆不存在');
+    if (vehicle.status !== 'available') {
+      const statusName: Record<string, string> = {
+        available: '可用', in_use: '使用中', maintenance: '维修中',
+        reserved: '已预约', out_of_service: '停用'
+      };
+      throw new Error(`预约失败：车辆【${vehicle.plateNumber}】当前${statusName[vehicle.status] || vehicle.status}，不可用于教学`);
+    }
+
     const conflict = db.appointments.find(a =>
       a.status !== 'cancelled' &&
       a.date === data.date &&
@@ -334,17 +414,18 @@ export function registerDatabaseHandlers() {
 
     if (conflict) {
       if (conflict.coachId === data.coachId) {
-        throw new Error('该教练此时段已有预约');
+        throw new Error('资源锁定失败：该教练此时段已有预约，请更换时段或教练');
       } else if (conflict.vehicleId === data.vehicleId) {
-        throw new Error('该车辆此时段已被占用');
+        throw new Error('资源锁定失败：该车辆此时段已被占用，请更换时段或车辆');
       } else {
-        throw new Error('该学员此时段已有预约');
+        throw new Error('资源锁定失败：该学员此时段已有预约，请更换时段');
       }
     }
 
     const student = db.students.find(s => s.id === data.studentId);
     if (!student) throw new Error('学员不存在');
-    if (student.remainingHours <= 0) throw new Error('该学员剩余学时不足');
+    if (student.status !== 'active') throw new Error(`学员状态为${student.status}，无法预约教学`);
+    if (student.remainingHours <= 0) throw new Error('该学员剩余学时不足，无法预约');
 
     const appointment: Appointment = {
       ...data,
@@ -371,24 +452,47 @@ export function registerDatabaseHandlers() {
     if (index === -1) throw new Error('预约不存在');
 
     const appointment = db.appointments[index];
+    if (typeof actualHours !== 'number' || isNaN(actualHours) || actualHours <= 0) {
+      throw new Error('实际学时无效，请输入大于0的数字');
+    }
+
+    // 1. 检查实际学时不超过预约时段本身的时长
+    const [sh, sm] = appointment.startTime.split(':').map(Number);
+    const [eh, em] = appointment.endTime.split(':').map(Number);
+    const slotHours = (eh - sh) + (em - sm) / 60;
+    if (actualHours > slotHours + 0.001) {
+      throw new Error(`实际学时(${actualHours.toFixed(1)}h)超过预约时段时长(${slotHours.toFixed(1)}h)，请核对`);
+    }
+
+    // 2. 检查实际学时不超过学员剩余学时
+    const studentIndex = db.students.findIndex(s => s.id === appointment.studentId);
+    if (studentIndex === -1) throw new Error('学员不存在');
+    const student = db.students[studentIndex];
+    if (actualHours > student.remainingHours + 0.001) {
+      throw new Error(
+        `实际学时(${actualHours.toFixed(1)}h)超过学员剩余学时(${student.remainingHours.toFixed(1)}h)，` +
+        `最多只能录入${student.remainingHours.toFixed(1)}小时，请联系主管核实`
+      );
+    }
+
+    const safeHours = Math.min(actualHours, student.remainingHours, slotHours);
+
     db.appointments[index] = {
       ...appointment,
       status: 'completed',
-      actualHours,
+      actualHours: safeHours,
       completedAt: new Date().toISOString()
     };
 
-    const studentIndex = db.students.findIndex(s => s.id === appointment.studentId);
     if (studentIndex !== -1) {
-      const student = db.students[studentIndex];
       const subjectKey = `${appointment.subject}Hours` as keyof Student;
       const currentSubjectHours = (student[subjectKey] as number) || 0;
 
       db.students[studentIndex] = {
         ...student,
-        completedHours: student.completedHours + actualHours,
-        remainingHours: Math.max(0, student.remainingHours - actualHours),
-        [subjectKey]: currentSubjectHours + actualHours,
+        completedHours: student.completedHours + safeHours,
+        remainingHours: Math.max(0, student.remainingHours - safeHours),
+        [subjectKey]: currentSubjectHours + safeHours,
         lastStudyDate: appointment.date
       };
     }
@@ -397,7 +501,7 @@ export function registerDatabaseHandlers() {
     if (vehicleIndex !== -1) {
       db.vehicles[vehicleIndex] = {
         ...db.vehicles[vehicleIndex],
-        totalUsageHours: db.vehicles[vehicleIndex].totalUsageHours + actualHours
+        totalUsageHours: db.vehicles[vehicleIndex].totalUsageHours + safeHours
       };
     }
 
@@ -408,7 +512,21 @@ export function registerDatabaseHandlers() {
   // Exams
   ipcMain.handle('db:getExams', () => db.exams);
 
+  function validateExamIntegrity(studentId: string, examData: Partial<Exam>): string | null {
+    const missing: string[] = [];
+    const student = db.students.find(s => s.id === studentId);
+    if (!student?.idCard) missing.push('身份证号码');
+    if (!examData.examDate) missing.push('考试日期');
+    if (!examData.examTime) missing.push('考试时间');
+    if (!examData.location || String(examData.location).trim() === '') missing.push('考试地点');
+    return missing.length === 0 ? null : `信息缺失：${missing.join('、')}，请先完善后再执行此操作`;
+  }
+
   ipcMain.handle('db:createExam', (_e, data: Omit<Exam, 'id'>) => {
+    if (data.status === 'approved' || data.status === 'booked') {
+      const error = validateExamIntegrity(data.studentId, data);
+      if (error) throw new Error(`保存被拦截：${error}`);
+    }
     const exam: Exam = {
       ...data,
       id: generateId('exam'),
@@ -424,7 +542,14 @@ export function registerDatabaseHandlers() {
   ipcMain.handle('db:updateExam', (_e, id: string, data: Partial<Exam>) => {
     const index = db.exams.findIndex(e => e.id === id);
     if (index === -1) throw new Error('考试记录不存在');
-    db.exams[index] = { ...db.exams[index], ...data };
+    const merged: Exam = { ...db.exams[index], ...data } as Exam;
+    const newStatus = data.status ?? merged.status;
+    if ((newStatus === 'approved' || newStatus === 'booked') &&
+        (db.exams[index].status !== 'approved' && db.exams[index].status !== 'booked' || Object.keys(data).some(k => k === 'status'))) {
+      const error = validateExamIntegrity(merged.studentId, merged);
+      if (error) throw new Error(`操作被拦截：${error}`);
+    }
+    db.exams[index] = merged;
     saveDatabase();
     return db.exams[index];
   });
@@ -492,6 +617,37 @@ export function registerDatabaseHandlers() {
 
   // Alerts
   ipcMain.handle('db:getAlerts', () => db.alerts);
+
+  ipcMain.handle('db:updateAlert', (_e, id: string, data: Partial<Alert>) => {
+    const index = db.alerts.findIndex(a => a.id === id);
+    if (index === -1) throw new Error('预警不存在');
+    db.alerts[index] = { ...db.alerts[index], ...data };
+    saveDatabase();
+    return db.alerts[index];
+  });
+
+  ipcMain.handle('db:markAlertRead', (_e, id: string) => {
+    const index = db.alerts.findIndex(a => a.id === id);
+    if (index === -1) throw new Error('预警不存在');
+    db.alerts[index] = { ...db.alerts[index], read: true };
+    saveDatabase();
+    return db.alerts[index];
+  });
+
+  ipcMain.handle('db:markAlertHandled', (_e, id: string) => {
+    const index = db.alerts.findIndex(a => a.id === id);
+    if (index === -1) throw new Error('预警不存在');
+    const now = new Date().toISOString();
+    db.alerts[index] = {
+      ...db.alerts[index],
+      read: true,
+      handled: true,
+      handledBy: 'admin',
+      handledAt: now
+    };
+    saveDatabase();
+    return db.alerts[index];
+  });
 
   ipcMain.handle('db:checkInactiveStudents', () => {
     const now = new Date();
@@ -646,6 +802,18 @@ export function registerDatabaseHandlers() {
 function parseTime(time: string): number {
   const [h, m] = time.split(':').map(Number);
   return h * 60 + m;
+}
+
+function validateStudentPhoto(photo: string | undefined | null, options: { required?: boolean } = {}): string | null {
+  const { required = true } = options;
+  if (!photo || photo.trim() === '') {
+    if (required) return '学员照片缺失，请上传照片（照片为必填项）';
+    return null;
+  }
+  if (typeof photo !== 'string') return '照片数据格式异常';
+  if (!/^data:image\//i.test(photo)) return '照片格式不正确，请上传JPG/PNG等标准图片';
+  if (photo.length < 2000) return '照片文件过小，可能为无效图片，请重新上传（建议≥300×400像素）';
+  return null;
 }
 
 function computeStatistics(params: { startDate?: string; endDate?: string }) {

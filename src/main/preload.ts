@@ -38,6 +38,9 @@ contextBridge.exposeInMainWorld('api', {
 
   getAlerts: () => ipcRenderer.invoke('db:getAlerts'),
   checkInactiveStudents: () => ipcRenderer.invoke('db:checkInactiveStudents'),
+  updateAlert: (id: string, data: any) => ipcRenderer.invoke('db:updateAlert', id, data),
+  markAlertRead: (id: string) => ipcRenderer.invoke('db:markAlertRead', id),
+  markAlertHandled: (id: string) => ipcRenderer.invoke('db:markAlertHandled', id),
 
   getStatistics: (params: any) => ipcRenderer.invoke('db:getStatistics', params),
   exportReport: (params: any) => ipcRenderer.invoke('db:exportReport', params),

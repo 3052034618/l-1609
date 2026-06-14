@@ -52,6 +52,8 @@ export default function Exams() {
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
   const [form] = Form.useForm();
   const [resultForm] = Form.useForm();
+  const [reminderModalOpen, setReminderModalOpen] = useState(false);
+  const [reminderList, setReminderList] = useState<Exam[]>([]);
 
   useEffect(() => {
     loadData();
@@ -72,24 +74,36 @@ export default function Exams() {
   }
 
   async function checkUpcomingExams() {
+    await new Promise(r => setTimeout(r, 300));
     const now = dayjs();
-    const upcoming = exams.filter(e => {
-      if (!e.examDate || e.reminderSent) return false;
+    const upcoming: Exam[] = [];
+    for (const e of exams) {
+      if (!e.examDate || e.reminderSent) continue;
       const examTime = dayjs(`${e.examDate} ${e.examTime || '00:00'}`);
       const diff = examTime.diff(now, 'hour');
-      return diff > 0 && diff <= 24;
-    });
-    for (const exam of upcoming) {
-      const student = students.find(s => s.id === exam.studentId);
-      if (student) {
-        message.info({
-          content: `考试提醒：学员【${student.name}】将于24小时内参加${SUBJECT_NAMES[exam.type]}考试`,
-          icon: <BellOutlined />,
-          duration: 5
-        });
-      }
-      await api.updateExam(exam.id, { reminderSent: true });
+      if (diff > 0 && diff <= 24) upcoming.push(e);
     }
+    if (upcoming.length > 0) {
+      setReminderList(upcoming);
+      setReminderModalOpen(true);
+      for (const exam of upcoming) {
+        await api.updateExam(exam.id, { reminderSent: true });
+      }
+    }
+  }
+
+  function validateExamCompleteness(exam: Exam, student?: Student | null): { valid: boolean; missing: string[]; message: string } {
+    const missing: string[] = [];
+    const s = student || students.find(st => st.id === exam.studentId);
+    if (!s?.idCard) missing.push('身份证号码');
+    if (!exam.examDate) missing.push('考试日期');
+    if (!exam.examTime) missing.push('考试时间');
+    if (!exam.location || exam.location.trim() === '') missing.push('考试地点');
+    return {
+      valid: missing.length === 0,
+      missing,
+      message: missing.length === 0 ? '信息完整' : `信息缺失：${missing.join('、')}，请先完善后再继续`
+    };
   }
 
   async function handleGenerateSuggestions() {
@@ -119,16 +133,23 @@ export default function Exams() {
 
   async function handleApprove(exam: Exam) {
     try {
-      if (!exam.examDate) {
-        message.warning('请先完善考试日期等信息');
+      const check = validateExamCompleteness(exam);
+      if (!check.valid) {
+        message.warning(`审核被拦截：${check.message}，请先编辑完善信息`);
         setEditingExam(exam);
-        form.setFieldsValue(exam);
+        form.setFieldsValue({
+          ...exam,
+          examDate: exam.examDate ? dayjs(exam.examDate) : null,
+          examTime: exam.examTime ? dayjs(exam.examTime, 'HH:mm') : null
+        });
         setModalOpen(true);
         return;
       }
-      await api.updateExam(exam.id, { status: 'approved' });
-      message.success('审核通过');
-      loadData();
+      const result = await api.updateExam(exam.id, { status: 'approved' });
+      if (result) {
+        message.success('审核通过，考试信息完整，已推送至学员');
+        loadData();
+      }
     } catch (e: any) {
       message.error(e.message || '操作失败');
     }
@@ -147,6 +168,16 @@ export default function Exams() {
         examDate: values.examDate?.format('YYYY-MM-DD') || null,
         examTime: values.examTime?.format('HH:mm') || null
       };
+      const student = students.find(s => s.id === data.studentId);
+
+      if (data.status === 'approved' || data.status === 'booked') {
+        const check = validateExamCompleteness(data as Exam, student);
+        if (!check.valid) {
+          message.warning(`保存被拦截：${check.message}`);
+          return;
+        }
+      }
+
       if (editingExam) {
         await api.updateExam(editingExam.id, data);
         message.success('修改成功');
@@ -452,6 +483,94 @@ export default function Exams() {
             </div>
           </Form>
         )}
+      </Modal>
+
+      <Modal
+        title={<span><BellOutlined style={{ color: '#1677ff', marginRight: 8 }} />24小时内考试提醒（共 {reminderList.length} 场）</span>}
+        open={reminderModalOpen}
+        onCancel={() => setReminderModalOpen(false)}
+        width={720}
+        centered
+        footer={[
+          <Button key="ok" type="primary" onClick={() => setReminderModalOpen(false)}>
+            我知道了（已发送提醒）
+          </Button>
+        ]}
+      >
+        <AntAlert
+          message="重要提示"
+          description="以下考试将在24小时内进行，系统已自动标记提醒为已发送，请确保学员知晓考试信息。若信息不完整，请及时完善。"
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+        <List
+          dataSource={reminderList}
+          itemLayout="vertical"
+          renderItem={(exam) => {
+            const student = students.find(s => s.id === exam.studentId);
+            const check = validateExamCompleteness(exam, student);
+            const examTime = dayjs(`${exam.examDate} ${exam.examTime || '00:00'}`);
+            const hoursLeft = Math.max(1, Math.round(examTime.diff(dayjs(), 'hour')));
+            return (
+              <List.Item key={exam.id}>
+                <List.Item.Meta
+                  avatar={<Avatar size={48} icon={<BellOutlined style={{ color: '#1677ff' }} />} style={{ backgroundColor: '#e6f4ff' }} />}
+                  title={
+                    <Space>
+                      <span style={{ fontWeight: 600, fontSize: 16 }}>
+                        {student?.name || '未知学员'} — 参加{SUBJECT_NAMES[exam.type]}
+                      </span>
+                      <Tag color="red">还剩约 {hoursLeft} 小时</Tag>
+                      {check.valid ? <Tag color="green">信息完整</Tag> : <Tag color="red">信息有缺失</Tag>}
+                    </Space>
+                  }
+                  description={
+                    <div style={{ marginTop: 8 }}>
+                      <Descriptions column={2} size="small" bordered>
+                        <Descriptions.Item label="考试日期">{exam.examDate || '未安排（缺失）'}</Descriptions.Item>
+                        <Descriptions.Item label="考试时间">{exam.examTime || '未安排（缺失）'}</Descriptions.Item>
+                        <Descriptions.Item label="考试地点" span={2}>{exam.location || '未填写（缺失）'}</Descriptions.Item>
+                        <Descriptions.Item label="身份证号" span={2}>
+                          {student?.idCard || '缺失（学员档案中无身份证号）'}
+                        </Descriptions.Item>
+                      </Descriptions>
+                      {!check.valid && (
+                        <AntAlert
+                          style={{ marginTop: 12 }}
+                          message={`考前信息不完整 — 缺失：${check.missing.join('、')}`}
+                          description="请点击详情按钮补全信息，以免影响学员正常参加考试"
+                          type="error"
+                          showIcon
+                          action={
+                            <Space style={{ padding: 8 }}>
+                              <Button
+                                size="small"
+                                type="primary"
+                                onClick={() => {
+                                  setEditingExam(exam);
+                                  form.setFieldsValue({
+                                    ...exam,
+                                    examDate: exam.examDate ? dayjs(exam.examDate) : null,
+                                    examTime: exam.examTime ? dayjs(exam.examTime, 'HH:mm') : null
+                                  });
+                                  setReminderModalOpen(false);
+                                  setModalOpen(true);
+                                }}
+                              >
+                                立即补全
+                              </Button>
+                            </Space>
+                          }
+                        />
+                      )}
+                    </div>
+                  }
+                />
+              </List.Item>
+            );
+          }}
+        />
       </Modal>
     </div>
   );

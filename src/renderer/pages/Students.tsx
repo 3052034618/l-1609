@@ -35,6 +35,7 @@ import {
   calculateAge,
   validateAge,
   validatePhoto,
+  validateExistingPhoto,
   SUBJECT_NAMES,
   STUDENT_STATUS_NAMES
 } from '../utils/validators';
@@ -53,6 +54,8 @@ export default function Students() {
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string>('');
+  const [photoError, setPhotoError] = useState<string>('');
+  const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -75,6 +78,7 @@ export default function Students() {
     setEditingStudent(null);
     setPhotoFile(null);
     setPhotoPreview('');
+    setPhotoError('');
     form.resetFields();
     setModalOpen(true);
   }
@@ -83,6 +87,7 @@ export default function Students() {
     setEditingStudent(student);
     setPhotoPreview(student.photo || '');
     setPhotoFile(null);
+    setPhotoError('');
     form.setFieldsValue({
       ...student,
       gender: student.gender
@@ -121,23 +126,33 @@ export default function Students() {
 
   const uploadProps: UploadProps = {
     beforeUpload: async (file) => {
-      const result = await validatePhoto(file);
+      const result = await validatePhoto(file, { required: true });
       if (!result.valid) {
+        setPhotoError(result.message);
         message.error(result.message);
         return Upload.LIST_IGNORE;
       }
       setPhotoFile(file);
       setPhotoPreview(URL.createObjectURL(file));
+      setPhotoError('');
       return false;
     },
     showUploadList: false,
-    accept: 'image/*'
+    accept: 'image/jpeg,image/png,image/gif,image/bmp,image/webp'
   };
 
   async function handleSubmit(values: any) {
+    if (submitting) return;
     try {
       let photoData = photoPreview;
+
       if (photoFile) {
+        const fileCheck = await validatePhoto(photoFile, { required: true });
+        if (!fileCheck.valid) {
+          setPhotoError(fileCheck.message);
+          message.error(fileCheck.message);
+          return;
+        }
         const reader = new FileReader();
         photoData = await new Promise((resolve) => {
           reader.onload = (e) => resolve(e.target?.result as string);
@@ -145,6 +160,33 @@ export default function Students() {
         });
       }
 
+      if (editingStudent) {
+        if (!photoData) {
+          const existingCheck = validateExistingPhoto(editingStudent.photo, { required: true });
+          if (!existingCheck.valid) {
+            setPhotoError(existingCheck.message);
+            message.error(existingCheck.message);
+            return;
+          }
+          photoData = editingStudent.photo;
+        }
+      } else {
+        if (!photoData) {
+          setPhotoError('请上传学员照片，照片为必填项（未上传或上传校验未通过）');
+          message.error('请上传学员照片，照片为必填项');
+          return;
+        }
+      }
+
+      const finalPhotoCheck = validateExistingPhoto(photoData, { required: true });
+      if (!finalPhotoCheck.valid) {
+        setPhotoError(finalPhotoCheck.message);
+        message.error(finalPhotoCheck.message);
+        return;
+      }
+      setPhotoError('');
+
+      setSubmitting(true);
       const data = {
         ...values,
         photo: photoData,
@@ -162,6 +204,8 @@ export default function Students() {
       loadStudents();
     } catch (e: any) {
       message.error(e.message || '保存失败');
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -398,20 +442,39 @@ export default function Students() {
             </Col>
           </Row>
 
-          <Form.Item label="学员照片" name="photo">
+          <Form.Item
+            label="学员照片"
+            name="photo"
+            required
+            help={
+              <span style={{ color: photoError ? '#ff4d4f' : undefined }}>
+                {photoError || '支持JPG/PNG/GIF/BMP/WEBP，必须300×400像素以上，不超过5MB，建议竖版证件照'}
+              </span>
+            }
+            validateStatus={photoError ? 'error' : undefined}
+          >
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
               <Avatar
                 src={photoPreview}
                 icon={<UserOutlined />}
                 size={80}
-                style={{ border: '1px solid #ddd' }}
+                style={{
+                  border: photoError ? '2px solid #ff4d4f' : '1px solid #ddd',
+                  backgroundColor: photoPreview ? 'transparent' : '#f5f5f5'
+                }}
               />
-              <Upload {...uploadProps}>
-                <Button icon={<UploadOutlined />}>上传照片</Button>
-              </Upload>
-              <span style={{ color: '#999', fontSize: 12 }}>
-                支持JPG/PNG，建议300x400像素以上，不超过5MB
-              </span>
+              <Space direction="vertical" size="small">
+                <Upload {...uploadProps}>
+                  <Button icon={<UploadOutlined />} type={photoError ? 'primary' : 'default'} danger={!!photoError}>
+                    {photoPreview ? '重新上传照片' : '上传照片 *'}
+                  </Button>
+                </Upload>
+                {editingStudent && !photoFile && (
+                  <span style={{ color: '#52c41a', fontSize: 12 }}>
+                    ✓ 已保存照片，可正常提交（如需更换请点击重新上传）
+                  </span>
+                )}
+              </Space>
             </div>
           </Form.Item>
 
