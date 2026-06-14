@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Table,
   Button,
@@ -9,7 +9,8 @@ import {
   Empty,
   List,
   Avatar,
-  Badge
+  Badge,
+  Tooltip
 } from 'antd';
 import {
   WarningOutlined,
@@ -19,16 +20,48 @@ import {
   BellOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
 import { api, Alert as AlertType, Student } from '../services/api';
+import 'dayjs/locale/zh-cn';
+
+dayjs.extend(relativeTime);
+dayjs.locale('zh-cn');
 
 export default function Alerts() {
   const [alerts, setAlerts] = useState<AlertType[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(false);
+  const [, setTick] = useState(0);
 
   useEffect(() => {
     loadData();
+    const timer = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(timer);
   }, []);
+
+  const studentMap = useMemo(() => {
+    const m: Record<string, Student> = {};
+    for (const s of students) m[s.id] = s;
+    return m;
+  }, [students]);
+
+  const enrichedAlerts = useMemo(() => {
+    return alerts.map(a => {
+      const s = studentMap[a.studentId];
+      return {
+        ...a,
+        _studentName: s?.name || '-',
+        _studentPhoto: s?.photo,
+        _relativeCreated: dayjs(a.createdAt).fromNow(),
+        _absoluteCreated: dayjs(a.createdAt).format('YYYY-MM-DD HH:mm:ss'),
+        _relativeHandled: a.handledAt ? dayjs(a.handledAt).fromNow() : '',
+        _absoluteHandled: a.handledAt ? dayjs(a.handledAt).format('YYYY-MM-DD HH:mm:ss') : ''
+      };
+    });
+  }, [alerts, studentMap, tick]);
+
+  const pendingAlerts = useMemo(() => enrichedAlerts.filter(a => !a.handled), [enrichedAlerts]);
+  const handledAlerts = useMemo(() => enrichedAlerts.filter(a => a.handled), [enrichedAlerts]);
 
   async function loadData() {
     setLoading(true);
@@ -55,6 +88,7 @@ export default function Alerts() {
         message.success('暂无新预警');
       }
       loadData();
+      window.dispatchEvent(new CustomEvent('alerts-updated'));
     } catch (e: any) {
       message.error(e.message || '检测失败');
     }
@@ -63,19 +97,15 @@ export default function Alerts() {
   async function handleMarkHandled(id: string) {
     try {
       await api.markAlertHandled(id);
-      const s = students.find(st => {
-        const a = alerts.find(x => x.id === id);
-        return a && st.id === a.studentId;
-      });
-      message.success(s ? `已跟进学员【${s.name}】的无学时预警，状态已永久保存` : '已标记为已处理，状态已永久保存');
-      loadData();
+      const a = alerts.find(x => x.id === id);
+      const s = a ? studentMap[a.studentId] : undefined;
+      message.success(s ? `已跟进学员【${s?.name}】的无学时预警，状态已永久保存` : '已标记为已处理，状态已永久保存');
+      await loadData();
+      window.dispatchEvent(new CustomEvent('alerts-updated'));
     } catch (e: any) {
       message.error(e.message || '操作失败');
     }
   }
-
-  const pendingAlerts = alerts.filter(a => !a.handled);
-  const handledAlerts = alerts.filter(a => a.handled);
 
   function getAlertIcon(type: string) {
     switch (type) {
@@ -112,10 +142,10 @@ export default function Alerts() {
     },
     {
       title: '学员',
-      dataIndex: 'studentId',
+      dataIndex: '_studentName',
       key: 'studentId',
-      render: (id: string) => {
-        const s = students.find(x => x.id === id);
+      render: (_name: string, record: any) => {
+        const s = studentMap[record.studentId];
         return s ? (
           <span>
             <Avatar size={24} src={s.photo} icon={<UserOutlined />} style={{ marginRight: 8 }} />
@@ -126,28 +156,36 @@ export default function Alerts() {
     },
     { title: '预警内容', dataIndex: 'message', key: 'message' },
     {
-      title: '预警时间',
-      dataIndex: 'createdAt',
+      title: '触发时间',
+      dataIndex: '_relativeCreated',
       key: 'createdAt',
-      width: 170,
-      render: (t: string) => dayjs(t).format('YYYY-MM-DD HH:mm')
+      width: 180,
+      sorter: (a: any, b: any) => a.createdAt.localeCompare(b.createdAt),
+      render: (text: string, record: any) => (
+        <Tooltip title={`绝对时间：${record._absoluteCreated}`}>
+          <span>{text}</span>
+        </Tooltip>
+      )
     },
     {
-      title: '状态',
-      dataIndex: 'handled',
-      key: 'handled',
-      width: 100,
-      render: (handled: boolean) => handled
-        ? <Tag color="green">已处理</Tag>
-        : <Badge status="processing" text="待处理" />
+      title: '处理信息',
+      key: 'handledInfo',
+      width: 170,
+      render: (_: any, record: any) => record.handled ? (
+        <Tooltip title={`处理时间：${record._absoluteHandled || '-'}`}>
+          <Tag color="green">已跟进 · {record._relativeHandled || '刚刚'}</Tag>
+        </Tooltip>
+      ) : (
+        <Badge status="processing" text="待跟进" />
+      )
     },
     {
       title: '操作',
       key: 'actions',
       width: 120,
       render: (_: any, record: AlertType) => !record.handled && (
-        <Button type="link" icon={<CheckOutlined />} onClick={() => handleMarkHandled(record.id)}>
-          标记已处理
+        <Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => handleMarkHandled(record.id)}>
+          已跟进
         </Button>
       )
     }
@@ -193,11 +231,10 @@ export default function Alerts() {
       </Space>
 
       {pendingAlerts.length > 0 && (
-        <Card title={<span><WarningOutlined style={{ color: '#faad14' }} /> 待处理预警</span>} style={{ marginBottom: 16 }}>
+        <Card title={<span><WarningOutlined style={{ color: '#faad14' }} /> 待处理预警（含相对触发时间）</span>} style={{ marginBottom: 16 }}>
           <List
             dataSource={pendingAlerts.slice(0, 5)}
             renderItem={item => {
-              const student = students.find(s => s.id === item.studentId);
               return (
                 <List.Item
                   actions={[
@@ -209,19 +246,21 @@ export default function Alerts() {
                   <List.Item.Meta
                     avatar={
                       <Badge dot color="red">
-                        <Avatar src={student?.photo} icon={<UserOutlined />} />
+                        <Avatar src={item._studentPhoto} icon={<UserOutlined />} />
                       </Badge>
                     }
                     title={
                       <Space>
                         <Tag color="orange">无学时预警</Tag>
-                        <strong>{student?.name || '未知学员'}</strong>
+                        <strong>{item._studentName}</strong>
                       </Space>
                     }
                     description={
-                      <Space>
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
                         <span>{item.message}</span>
-                        <span style={{ color: '#999' }}>{dayjs(item.createdAt).fromNow()}</span>
+                        <Tooltip title={`首次触发时间：${item._absoluteCreated}`}>
+                          <span style={{ color: '#999' }}>⏰ {item._relativeCreated}</span>
+                        </Tooltip>
                       </Space>
                     }
                   />
@@ -232,13 +271,13 @@ export default function Alerts() {
         </Card>
       )}
 
-      <Card title="全部预警记录">
-        {alerts.length === 0 ? (
+      <Card title="全部预警记录（相对时间每分钟自动刷新）">
+        {enrichedAlerts.length === 0 ? (
           <Empty description="暂无预警记录" />
         ) : (
           <Table
             columns={columns}
-            dataSource={alerts}
+            dataSource={enrichedAlerts}
             rowKey="id"
             loading={loading}
             pagination={{ pageSize: 10 }}

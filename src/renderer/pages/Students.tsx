@@ -144,7 +144,7 @@ export default function Students() {
   async function handleSubmit(values: any) {
     if (submitting) return;
     try {
-      let photoData = photoPreview;
+      let photoData: string = photoPreview;
 
       if (photoFile) {
         const fileCheck = await validatePhoto(photoFile, { required: true });
@@ -161,16 +161,23 @@ export default function Students() {
       }
 
       if (editingStudent) {
-        if (!photoData) {
-          const existingCheck = validateExistingPhoto(editingStudent.photo, { required: true });
-          if (!existingCheck.valid) {
-            setPhotoError(existingCheck.message);
-            message.error(existingCheck.message);
+        // 编辑模式：若没上传新文件，强制以数据库中真实的旧照片为准（不用可能被缓存的photoPreview）
+        // 然后无论新旧，**必须**按报名规则校验一遍
+        if (!photoFile) {
+          photoData = editingStudent.photo || '';
+          const oldCheck = validateExistingPhoto(photoData, { required: true });
+          if (!oldCheck.valid) {
+            setPhotoError(
+              `历史档案中照片校验不通过：${oldCheck.message}。请重新上传符合要求的照片后再保存其他修改`
+            );
+            message.error(
+              `历史照片校验不通过：${oldCheck.message}，请重新上传照片后再修改其他字段`
+            );
             return;
           }
-          photoData = editingStudent.photo;
         }
       } else {
+        // 新增模式：必须有照片
         if (!photoData) {
           setPhotoError('请上传学员照片，照片为必填项（未上传或上传校验未通过）');
           message.error('请上传学员照片，照片为必填项');
@@ -178,6 +185,7 @@ export default function Students() {
         }
       }
 
+      // 最终统一校验（双保险）
       const finalPhotoCheck = validateExistingPhoto(photoData, { required: true });
       if (!finalPhotoCheck.valid) {
         setPhotoError(finalPhotoCheck.message);

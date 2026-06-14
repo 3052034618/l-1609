@@ -114,16 +114,20 @@ export function registerDatabaseHandlers() {
       data.age = age;
     }
 
-    if ('photo' in data) {
-      const photoToCheck = data.photo;
-      if (!photoToCheck && db.students[index].photo) {
+    // 合并出最终对象，**无论是否修改了照片字段，都必须按报名规则校验最终照片**
+    const merged = { ...db.students[index], ...data } as Student;
+    const photoError = validateStudentPhoto(merged.photo, { required: true });
+    if (photoError) {
+      if ('photo' in data) {
+        throw new Error(`新上传的照片校验失败：${photoError}`);
       } else {
-        const photoError = validateStudentPhoto(photoToCheck || db.students[index].photo, { required: true });
-        if (photoError) throw new Error(`照片校验失败：${photoError}`);
+        throw new Error(
+          `学员档案中原有照片校验不通过（${photoError}），请先重新上传符合要求的照片，再保存其他字段的修改`
+        );
       }
     }
 
-    db.students[index] = { ...db.students[index], ...data };
+    db.students[index] = merged;
     saveDatabase();
     return db.students[index];
   });
@@ -210,11 +214,19 @@ export function registerDatabaseHandlers() {
   // Schedules - Smart scheduling
   ipcMain.handle('db:getSchedules', () => db.schedules);
 
+  // 资质权重：数字越大优先级越高（用于排序时降序）
+  // level 'master'（金牌）是数据库实际存储的最高级（初始数据 coach_001 张教练）
   const COACH_LEVEL_WEIGHT: Record<string, number> = {
-    'gold': 4,
+    'master': 4,
     'senior': 3,
     'intermediate': 2,
     'junior': 1
+  };
+  const COACH_LEVEL_CN: Record<string, string> = {
+    'master': '金牌',
+    'senior': '高级',
+    'intermediate': '中级',
+    'junior': '初级'
   };
 
   ipcMain.handle('db:generateSchedules', (_e, dateStr: string) => {
@@ -288,13 +300,15 @@ export function registerDatabaseHandlers() {
     // 按时间段逐个排
     for (const slot of timeSlots) {
       // 优先选资质最高、且有剩余工时、且时段无冲突的教练
-      const coach = sortedCoaches.find(c => {
+      // sortedCoaches 已按资质（master>senior>intermediate>junior）+ 已排学时升序排序
+      const coachIndex = sortedCoaches.findIndex(c => {
         const currentHours = coachHourCounts[c.id] || 0;
         if (currentHours + slot.hours > c.maxDailyHours) return false;
         if (hasCoachSlotConflict(c.id, slot.start, slot.end)) return false;
         return true;
       });
-      if (!coach) continue;
+      if (coachIndex === -1) continue;
+      const coach = sortedCoaches[coachIndex];
 
       // 找此时段可用、无冲突的车辆
       const vehicle = allAvailableVehicles.find(v => {
@@ -310,9 +324,9 @@ export function registerDatabaseHandlers() {
         .map(s => s.id);
 
       if (slotStudents.length > 0) {
-        const levelNames: Record<string, string> = {
-          gold: '金牌', senior: '高级', intermediate: '中级', junior: '初级'
-        };
+        const weight = COACH_LEVEL_WEIGHT[coach.level] || 0;
+        const rank = coachIndex + 1;
+        const totalCandidates = sortedCoaches.length;
         const schedule: Schedule = {
           id: generateId('schedule'),
           date: dateStr,
@@ -325,7 +339,10 @@ export function registerDatabaseHandlers() {
           approvedBy: null,
           approvedAt: null,
           createdAt: new Date().toISOString(),
-          notes: `AI自动排班 - 教练资质:${levelNames[coach.level] || coach.level} | 当日累计:${(coachHourCounts[coach.id] || 0) + slot.hours}h/${coach.maxDailyHours}h`
+          notes:
+            `AI自动择优 | ${COACH_LEVEL_CN[coach.level] || coach.level}教练（${weight}级）` +
+            ` | 共${totalCandidates}位候选，本教练排名第${rank}` +
+            ` | 当日累计：${(coachHourCounts[coach.id] || 0) + slot.hours}h/${coach.maxDailyHours}h`
         };
         todaySchedules.push(schedule);
         coachHourCounts[coach.id] = (coachHourCounts[coach.id] || 0) + slot.hours;

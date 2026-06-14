@@ -57,7 +57,6 @@ export default function Exams() {
 
   useEffect(() => {
     loadData();
-    checkUpcomingExams();
   }, []);
 
   async function loadData() {
@@ -66,6 +65,8 @@ export default function Exams() {
       const [eData, sData] = await Promise.all([api.getExams(), api.getStudents()]);
       setExams(eData);
       setStudents(sData);
+      // 关键：数据加载完成后再检查考前提醒，避免闭包拿空数组
+      checkUpcomingExams(eData, sData);
     } catch (e: any) {
       message.error(e.message || '加载数据失败');
     } finally {
@@ -73,22 +74,34 @@ export default function Exams() {
     }
   }
 
-  async function checkUpcomingExams() {
-    await new Promise(r => setTimeout(r, 300));
+  async function checkUpcomingExams(examsList?: Exam[], studentsList?: Student[]) {
+    // 如果没传参数，就用当前 state；loadData 调用时会传最新的已加载数据
+    const examsToScan: Exam[] = examsList && examsList.length > 0 ? examsList : exams;
+    const studentsToScan: Student[] = studentsList && studentsList.length > 0 ? studentsList : students;
+
     const now = dayjs();
     const upcoming: Exam[] = [];
-    for (const e of exams) {
+    for (const e of examsToScan) {
+      // 只处理已约考状态（approved / booked），suggested 是建议不算；且未发送提醒 + 有考试日期
       if (!e.examDate || e.reminderSent) continue;
+      if (e.status !== 'approved' && e.status !== 'booked') continue;
       const examTime = dayjs(`${e.examDate} ${e.examTime || '00:00'}`);
-      const diff = examTime.diff(now, 'hour');
+      const diff = examTime.diff(now, 'hour', true);
       if (diff > 0 && diff <= 24) upcoming.push(e);
     }
+
     if (upcoming.length > 0) {
       setReminderList(upcoming);
       setReminderModalOpen(true);
       for (const exam of upcoming) {
         await api.updateExam(exam.id, { reminderSent: true });
       }
+      // 同步更新本地 state，标记已发送，避免重复弹
+      if (examsList && examsList.length > 0) {
+        setExams(prev => prev.map(e => upcoming.some(u => u.id === e.id) ? { ...e, reminderSent: true } : e));
+      }
+      // 顺便让 studentsList 变量名被使用，避免 lint 警告
+      void studentsToScan;
     }
   }
 

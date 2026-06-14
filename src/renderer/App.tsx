@@ -34,7 +34,12 @@ export default function App() {
   useEffect(() => {
     loadAlerts();
     const interval = setInterval(loadAlerts, 60000);
-    return () => clearInterval(interval);
+    const onAlertsUpdated = () => loadAlerts();
+    window.addEventListener('alerts-updated', onAlertsUpdated);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('alerts-updated', onAlertsUpdated);
+    };
   }, []);
 
   async function loadAlerts() {
