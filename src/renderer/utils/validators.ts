@@ -120,18 +120,81 @@ export async function validatePhoto(
 export function validateExistingPhoto(
   photoData: string | undefined | null,
   options: { required?: boolean } = {}
-): { valid: boolean; message: string } {
+): Promise<{ valid: boolean; message: string }> {
   const { required = true } = options;
-  if (!photoData || photoData.trim() === '') {
-    if (required) {
-      return { valid: false, message: '学员照片缺失，请上传照片' };
+  return new Promise((resolve) => {
+    if (!photoData || photoData.trim() === '') {
+      if (required) {
+        resolve({ valid: false, message: '学员照片缺失，请上传照片' });
+      } else {
+        resolve({ valid: true, message: '' });
+      }
+      return;
     }
-    return { valid: true, message: '' };
-  }
-  if (!photoData.startsWith('data:image/')) {
-    return { valid: false, message: '照片数据格式不正确，请重新上传' };
-  }
-  return { valid: true, message: '' };
+    if (!photoData.startsWith('data:image/')) {
+      resolve({ valid: false, message: '照片数据格式不正确，请重新上传' });
+      return;
+    }
+
+    // 从 data URL 中提取图片格式（data:image/jpeg;base64,... -> jpeg）
+    const formatMatch = photoData.match(/^data:image\/([a-zA-Z0-9+.-]+);/);
+    if (!formatMatch) {
+      resolve({ valid: false, message: '照片格式不支持，请上传JPG、PNG、GIF、BMP或WEBP格式的图片' });
+      return;
+    }
+    const format = formatMatch[1].toLowerCase();
+    const allowedFormats = ['jpeg', 'jpg', 'png', 'gif', 'bmp', 'webp'];
+    if (!allowedFormats.includes(format)) {
+      resolve({
+        valid: false,
+        message: `照片格式不支持：${format.toUpperCase()}格式，请上传JPG、PNG、GIF、BMP或WEBP格式的图片`
+      });
+      return;
+    }
+
+    // 计算 base64 数据大小（约等于原始文件大小）
+    const base64Data = photoData.split(',')[1] || '';
+    const sizeBytes = base64Data.length * 0.75;
+    const maxSize = 5 * 1024 * 1024;
+    if (sizeBytes === 0) {
+      resolve({ valid: false, message: '照片文件为空，请重新选择有效的图片文件' });
+      return;
+    }
+    if (sizeBytes > maxSize) {
+      const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2);
+      resolve({ valid: false, message: `照片大小为${sizeMB}MB，不能超过5MB` });
+      return;
+    }
+
+    // 加载图片校验尺寸和比例（和 validatePhoto 规则完全一致）
+    const img = new Image();
+    img.onload = () => {
+      if (img.width <= 0 || img.height <= 0) {
+        resolve({ valid: false, message: '无法获取照片尺寸，请重新选择有效图片' });
+        return;
+      }
+      if (img.width < 300 || img.height < 400) {
+        resolve({
+          valid: false,
+          message: `照片分辨率过低(${img.width}×${img.height}像素)，必须至少300×400像素才能保证清晰`
+        });
+        return;
+      }
+      if (img.width / img.height > 1.2 || img.height / img.width > 1.8) {
+        const orientation = img.width > img.height ? '横版' : '比例异常';
+        resolve({
+          valid: false,
+          message: `照片${orientation}(${img.width}:${img.height})，建议使用竖版证件照比例(3:4左右)`
+        });
+        return;
+      }
+      resolve({ valid: true, message: '' });
+    };
+    img.onerror = () => {
+      resolve({ valid: false, message: '照片文件损坏或无法读取，请更换其他图片' });
+    };
+    img.src = photoData;
+  });
 }
 
 export const SUBJECT_NAMES: Record<string, string> = {

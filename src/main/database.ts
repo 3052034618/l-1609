@@ -671,7 +671,8 @@ export function registerDatabaseHandlers() {
     const fifteenDaysAgo = new Date(now);
     fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
     const fifteenDaysAgoStr = fifteenDaysAgo.toISOString().split('T')[0];
-    // 已处理预警的冷却期：30天内刚处理过的同类型预警不再重复生成新的，避免刚点完已跟进又冒一条
+    // 冷却期：按【跟进时间(handledAt)】记住处理结果，30天内刚跟进过的同类型预警不再生成新的
+    // 哪怕这条预警是半年前创建的，只要刚点了已跟进，30天内就不会再冒新的
     const thirtyDaysAgo = new Date(now);
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -679,13 +680,14 @@ export function registerDatabaseHandlers() {
 
     for (const student of db.students.filter(s => s.status === 'active')) {
       if (!student.lastStudyDate || student.lastStudyDate < fifteenDaysAgoStr) {
-        // 查找是否已存在：未处理的同类型预警，或30天内创建/处理过的同类型预警（避免刚处理完就生成新的）
+        // 查找是否已存在：未处理的同类型预警，或30天内【刚跟进过】的同类型预警
         const existing = db.alerts.find(a => {
           if (a.studentId !== student.id || a.type !== 'inactive_student') return false;
           if (!a.handled) return true; // 未处理的，肯定已存在
-          // 已处理的，看创建时间是否在30天冷却期内
-          const alertCreated = new Date(a.createdAt);
-          return alertCreated >= thirtyDaysAgo;
+          // 已处理的，按【跟进时间(handledAt)】判断是否在30天冷却期内
+          // 老数据如果没有 handledAt，fallback 到 createdAt 兼容
+          const handledTime = a.handledAt ? new Date(a.handledAt) : new Date(a.createdAt);
+          return handledTime >= thirtyDaysAgo;
         });
         if (!existing) {
           const daysInactive = student.lastStudyDate
@@ -696,7 +698,7 @@ export function registerDatabaseHandlers() {
             id: generateId('alert'),
             type: 'inactive_student',
             studentId: student.id,
-            message: `学员【${student.name}】已连续${daysInactive}天无学时记录，请客服跟进（冷却期30天内仅生成1条）`,
+            message: `学员【${student.name}】已连续${daysInactive}天无学时记录，请客服跟进（按跟进时间记录，30天内不再重复提醒）`,
             createdAt: new Date().toISOString(),
             read: false,
             handled: false,
@@ -837,7 +839,37 @@ function validateStudentPhoto(photo: string | undefined | null, options: { requi
   }
   if (typeof photo !== 'string') return '照片数据格式异常';
   if (!/^data:image\//i.test(photo)) return '照片格式不正确，请上传JPG/PNG等标准图片';
-  if (photo.length < 2000) return '照片文件过小，可能为无效图片，请重新上传（建议≥300×400像素）';
+
+  // 校验具体图片格式（必须在允许范围内）
+  const formatMatch = photo.match(/^data:image\/([a-zA-Z0-9+.-]+);/i);
+  if (!formatMatch) return '照片格式不支持，请上传JPG、PNG、GIF、BMP或WEBP格式的图片';
+  const format = formatMatch[1].toLowerCase();
+  const allowedFormats = ['jpeg', 'jpg', 'png', 'gif', 'bmp', 'webp'];
+  if (!allowedFormats.includes(format)) {
+    return `照片格式不支持：${format.toUpperCase()}格式，请上传JPG、PNG、GIF、BMP或WEBP格式的图片`;
+  }
+
+  // 校验 base64 数据完整性和大小
+  const base64Data = photo.split(',')[1] || '';
+  if (base64Data.length < 100) return '照片文件为空或损坏，请重新上传';
+  // 估算文件大小（base64 长度 * 0.75 ≈ 原始字节数）
+  const sizeBytes = base64Data.length * 0.75;
+  const maxSize = 5 * 1024 * 1024; // 5MB
+  if (sizeBytes > maxSize) {
+    const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2);
+    return `照片大小为${sizeMB}MB，不能超过5MB`;
+  }
+  // 最小大小校验：300×400 的有效 JPG 至少约 15KB
+  const minSize = 15 * 1024; // 15KB
+  if (sizeBytes < minSize) {
+    const sizeKB = (sizeBytes / 1024).toFixed(1);
+    return `照片文件过小(${sizeKB}KB)，可能为无效图片或分辨率不足，请重新上传（建议≥300×400像素）`;
+  }
+
+  // 校验 base64 字符有效性（只允许 A-Za-z0-9+/=）
+  if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
+    return '照片数据包含无效字符，可能已损坏，请重新上传';
+  }
   return null;
 }
 

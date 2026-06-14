@@ -83,12 +83,12 @@ export default function Students() {
     setModalOpen(true);
   }
 
-  function handleEdit(student: Student) {
+  async function handleEdit(student: Student) {
     setEditingStudent(student);
     setPhotoPreview(student.photo || '');
     setPhotoFile(null);
     // 打开编辑弹窗时立即校验历史旧照片——不合格直接在照片位置红框显示原因（不等点保存才报错）
-    const oldCheck = validateExistingPhoto(student.photo || '', { required: true });
+    const oldCheck = await validateExistingPhoto(student.photo || '', { required: true });
     if (!oldCheck.valid) {
       setPhotoError(
         `历史照片不符合报名规则：${oldCheck.message}。请先重新上传符合要求的照片，再保存其他字段的修改`
@@ -173,7 +173,7 @@ export default function Students() {
         // 然后无论新旧，**必须**按报名规则校验一遍
         if (!photoFile) {
           photoData = editingStudent.photo || '';
-          const oldCheck = validateExistingPhoto(photoData, { required: true });
+          const oldCheck = await validateExistingPhoto(photoData, { required: true });
           if (!oldCheck.valid) {
             setPhotoError(
               `历史档案中照片校验不通过：${oldCheck.message}。请重新上传符合要求的照片后再保存其他修改`
@@ -194,7 +194,7 @@ export default function Students() {
       }
 
       // 最终统一校验（双保险）
-      const finalPhotoCheck = validateExistingPhoto(photoData, { required: true });
+      const finalPhotoCheck = await validateExistingPhoto(photoData, { required: true });
       if (!finalPhotoCheck.valid) {
         setPhotoError(finalPhotoCheck.message);
         message.error(finalPhotoCheck.message);
