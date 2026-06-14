@@ -671,14 +671,22 @@ export function registerDatabaseHandlers() {
     const fifteenDaysAgo = new Date(now);
     fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
     const fifteenDaysAgoStr = fifteenDaysAgo.toISOString().split('T')[0];
+    // 已处理预警的冷却期：30天内刚处理过的同类型预警不再重复生成新的，避免刚点完已跟进又冒一条
+    const thirtyDaysAgo = new Date(now);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
     const newAlerts: Alert[] = [];
 
     for (const student of db.students.filter(s => s.status === 'active')) {
       if (!student.lastStudyDate || student.lastStudyDate < fifteenDaysAgoStr) {
-        const existing = db.alerts.find(
-          a => a.studentId === student.id && a.type === 'inactive_student' && !a.handled
-        );
+        // 查找是否已存在：未处理的同类型预警，或30天内创建/处理过的同类型预警（避免刚处理完就生成新的）
+        const existing = db.alerts.find(a => {
+          if (a.studentId !== student.id || a.type !== 'inactive_student') return false;
+          if (!a.handled) return true; // 未处理的，肯定已存在
+          // 已处理的，看创建时间是否在30天冷却期内
+          const alertCreated = new Date(a.createdAt);
+          return alertCreated >= thirtyDaysAgo;
+        });
         if (!existing) {
           const daysInactive = student.lastStudyDate
             ? Math.floor((now.getTime() - new Date(student.lastStudyDate).getTime()) / (1000 * 60 * 60 * 24))
@@ -688,7 +696,7 @@ export function registerDatabaseHandlers() {
             id: generateId('alert'),
             type: 'inactive_student',
             studentId: student.id,
-            message: `学员【${student.name}】已连续${daysInactive}天无学时记录，请客服跟进`,
+            message: `学员【${student.name}】已连续${daysInactive}天无学时记录，请客服跟进（冷却期30天内仅生成1条）`,
             createdAt: new Date().toISOString(),
             read: false,
             handled: false,

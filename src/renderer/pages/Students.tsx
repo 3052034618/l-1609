@@ -87,7 +87,15 @@ export default function Students() {
     setEditingStudent(student);
     setPhotoPreview(student.photo || '');
     setPhotoFile(null);
-    setPhotoError('');
+    // 打开编辑弹窗时立即校验历史旧照片——不合格直接在照片位置红框显示原因（不等点保存才报错）
+    const oldCheck = validateExistingPhoto(student.photo || '', { required: true });
+    if (!oldCheck.valid) {
+      setPhotoError(
+        `历史照片不符合报名规则：${oldCheck.message}。请先重新上传符合要求的照片，再保存其他字段的修改`
+      );
+    } else {
+      setPhotoError('');
+    }
     form.setFieldsValue({
       ...student,
       gender: student.gender

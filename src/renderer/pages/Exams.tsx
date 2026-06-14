@@ -16,7 +16,9 @@ import {
   Descriptions,
   Row,
   Col,
-  Progress
+  Progress,
+  List,
+  Avatar
 } from 'antd';
 import {
   PlusOutlined,
@@ -278,6 +280,16 @@ export default function Exams() {
           : s === 'booked' || s === 'approved' ? 'blue'
           : s === 'suggested' ? 'orange' : 'red';
         return <Tag color={color}>{EXAM_STATUS_NAMES[s]}</Tag>;
+      }
+    },
+    {
+      title: '考前提醒',
+      key: 'reminderSent',
+      width: 110,
+      render: (_: any, r: Exam) => {
+        if (r.status !== 'approved' && r.status !== 'booked') return <Tag color="default">无需发送</Tag>;
+        if (r.reminderSent) return <Tag color="green" icon={<CheckOutlined />}>已发送</Tag>;
+        return <Tag color="orange">待发送</Tag>;
       }
     },
     {
